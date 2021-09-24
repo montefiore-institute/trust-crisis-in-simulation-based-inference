@@ -1,0 +1,22 @@
+name: casbi
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python==3.9.0
+  - cudatoolkit=11
+  - pytorch
+  - rsync
+  - jupyterlab
+  - pip
+  - torchvision
+  - matplotlib
+  - pip:
+    - git+https://github.com/montefiore-ai/hypothesis.git@0.4.0
+    - git+https://github.com/AWehenkel/Normalizing-Flows
+    - sklearn
+    - sbi
+    - cloudpickle
+    - palettable
+    - papermill
