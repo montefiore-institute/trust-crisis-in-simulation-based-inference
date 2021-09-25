@@ -1,0 +1,1 @@
+To pin a process to a single CPU core (at least on Linux), use `taskset -c 0 python benchmark/simulate.py`. The first output line will print the average execution time (in seconds), while the second like shows the standard deviation.
