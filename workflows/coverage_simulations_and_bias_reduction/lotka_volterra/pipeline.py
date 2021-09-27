@@ -669,7 +669,7 @@ for simulation_budget in simulations:
     if arguments.only_flows:
         evaluate_point_flow_sbi(simulation_budget, cl_list=credible_interval_levels)
     else:
-        evaluate_point_classifier(simulation_budget, regularize=False, cl_list=credible_interval_levels)
+        evaluate_point_classifier(simulation_budget, cl_list=credible_interval_levels)
         evaluate_point_flow_sbi(simulation_budget, cl_list=credible_interval_levels)
 
 ### END Workflow definition ####################################################
