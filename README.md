@@ -21,18 +21,17 @@ you@computer:~ conda activate crisissbi
 ```
 
 After the environment has been activated, there are 2 ways to execute the pipelines depending on your setup.
-The first only requires your laptop, in that regard simply execute a pipeline. For instance
+The first only requires your laptop. In that regard simply execute a pipeline as follows:
 ```console
 you@computer:~ cd workflows/auc_demonstration
 you@computer:~ python pipeline.py
 ```
-
 The other approach is on a Slurm enabled HPC cluster. To exploit the parallelism, execute the script as
 ```console
 you@computer:~ cd workflows/auc_demonstration
 you@computer:~ python pipeline.py --slurm
 ```
-The jobs will be automatically submitted to the Slurm queue.
+The jobs will be automatically submitted to the default Slurm queue.
 
 
 ## Citation
