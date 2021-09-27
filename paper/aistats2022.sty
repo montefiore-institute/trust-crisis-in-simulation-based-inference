@@ -69,9 +69,10 @@
 \newcommand{\statePaper}{0}
 \newcommand{\acceptedPaper}{1}
 \newcommand{\Notice@String}{Preliminary work. Under review by AISTATS \@conferenceyear. Do not distribute.}
-\newcommand{\AISTATS@appearing}{Proceedings of the \@conferenceordinal\,International Conference on Artificial
-  Intelligence and Statistics (AISTATS) \@conferenceyear,  \@conferencelocation\@. PMLR: Volume  \@conferencevolume. Copyright
-  \@conferenceyear\/ by the author(s).}
+%\newcommand{\AISTATS@appearing}{Proceedings of the \@conferenceordinal\,International Conference on Artificial
+%  Intelligence and Statistics (AISTATS) \@conferenceyear,  \@conferencelocation\@. PMLR: Volume  \@conferencevolume. Copyright
+%  \@conferenceyear\/ by the author(s).}
+\newcommand{\AISTATS@appearing}{Under review.}
 
 \ProcessOptions\relax
 
@@ -97,10 +98,10 @@
 \@float{copyrightbox}[b]
 \begin{center}
 \setlength{\unitlength}{1pc}
-\begin{picture}(20,2.5)
+\begin{picture}(20,1.0)
 % Create a line separating the main text from the note block.
 % 4.818pc==0.8in.
-\put(0,3.5){\line(1,0){4.818}}
+\put(0,1.5){\line(1,0){2.818}}
 % Insert the text string itself.  Note that the string has to be
 % enclosed in a parbox -- the \put call needs a box object to
 % position.  Without the parbox, the text gets splattered across the
