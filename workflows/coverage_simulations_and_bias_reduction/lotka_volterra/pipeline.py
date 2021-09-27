@@ -20,7 +20,7 @@ from util import simulate
 parser = argparse.ArgumentParser()
 parser.add_argument("--redo", action="store_true", help="Executes the workflow from scratch by removing all postconditions (default: false).")
 parser.add_argument("--simulate-test-n", type=int, default=100000, help="Number of testing simulations (default: 100 000).")
-parser.add_argument("--simulate-train-n", type=int, default=200000, help="Number of training simulations (default: 10 000 000).")
+parser.add_argument("--simulate-train-n", type=int, default=1000000, help="Number of training simulations (default: 10 000 000).")
 parser.add_argument("--slurm", action="store_true", help="Execute the workflow on a Slurm-enabled HPC system (default: false).")
 parser.add_argument("--test", action="store_true", help="Execute the workflow with fast hyper parameters for testing (default: false).")
 parser.add_argument("--only_flows", action="store_true", help="Execute only the flow part of the workflow (default: false).")
@@ -34,10 +34,10 @@ datadir = root + "/data"
 outputdir = root + "/output"
 
 # Hyperparameters
+batch_size = 128
 learning_rate = 0.001
 
 if arguments.test:
-    batch_size = 32
     num_ensembles = 2
     epochs = 2
     simulations = [2 ** n for n in range(10, 11)]
@@ -49,7 +49,6 @@ if arguments.test:
     sbc_nb_posterior_samples = 100
     diagnostic_n = 10
 else:
-    batch_size = 64
     num_ensembles = 5
     epochs = 100
     simulations = [2 ** n for n in range(10, 18)]
@@ -59,6 +58,7 @@ else:
     sbc_nb_posterior_samples = 1000
     diagnostic_n = 100000
 
+# Ensure that the training dataset can be simulated in blocks of 100000
 assert arguments.simulate_train_n % simulation_block_size == 0
 assert arguments.simulate_test_n % simulation_block_size == 0
 num_train_blocks = int(arguments.simulate_train_n / simulation_block_size)
@@ -108,9 +108,10 @@ def simulate_train(task_index):
         logging.info("Simulating training data block (" + str(task_index + 1) + " / " + str(num_train_blocks) + ")")
         simulate(n=simulation_block_size, directory=output_directory)
 
+
 @w.dependency(main)
-@w.postcondition(w.num_files(datadir_simulate_test + "/block-*/inputs.npy", num_test_blocks))
-@w.postcondition(w.num_files(datadir_simulate_test + "/block-*/outputs.npy", num_test_blocks))
+@w.postcondition(w.num_files(datadir_simulate_test + "/block-*/inputs.npy", num_train_blocks))
+@w.postcondition(w.num_files(datadir_simulate_test + "/block-*/outputs.npy", num_train_blocks))
 @w.slurm.cpu_and_memory(1, "8g")
 @w.slurm.timelimit("01:00:00")
 @w.tasks(num_test_blocks)
@@ -121,36 +122,36 @@ def simulate_test(task_index):
     dont_simulate &= os.path.exists(output_directory + "/inputs.npy")
     dont_simulate &= os.path.exists(output_directory + "/outputs.npy")
     if not dont_simulate:
-        logging.info("Simulating testing data block (" + str(task_index + 1) + " / " + str(num_test_blocks) + ")")
+        logging.info("Simulating testing data block (" + str(task_index + 1) + " / " + str(num_train_blocks) + ")")
         simulate(n=simulation_block_size, directory=output_directory)
-
 
 
 @w.dependency(simulate_train)
 @w.postcondition(w.exists(datadir_simulate_train + "/inputs.npy"))
 @w.postcondition(w.exists(datadir_simulate_train + "/outputs.npy"))
-@w.slurm.cpu_and_memory(1, "32g")
+@w.slurm.cpu_and_memory(1, "4g")
 @w.slurm.timelimit("01:00:00")
 def merge_train():
     logging.info("Merging training data.")
     cwd = os.getcwd()
     os.chdir(root)
-    shell("hypothesis merge --extension numpy --dimension 0 --in-memory --files 'data/train/block-*/inputs.npy' --sort --out data/train/inputs.npy")
-    shell("hypothesis merge --extension numpy --dimension 0 --in-memory --files 'data/train/block-*/outputs.npy' --sort --out data/train/outputs.npy")
+    shell("hypothesis merge --extension numpy --dimension 0 --files 'data/train/block-*/inputs.npy' --sort --out data/train/inputs.npy")
+    shell("hypothesis merge --extension numpy --dimension 0 --files 'data/train/block-*/outputs.npy' --sort --out data/train/outputs.npy")
     shell("rm -rf data/train/block-*")
     os.chdir(cwd)
+
 
 @w.dependency(simulate_test)
 @w.postcondition(w.exists(datadir_simulate_test + "/inputs.npy"))
 @w.postcondition(w.exists(datadir_simulate_test + "/outputs.npy"))
-@w.slurm.cpu_and_memory(1, "16g")
+@w.slurm.cpu_and_memory(1, "4g")
 @w.slurm.timelimit("01:00:00")
 def merge_test():
     logging.info("Merging testing data.")
     cwd = os.getcwd()
     os.chdir(root)
-    shell("hypothesis merge --extension numpy --dimension 0 --in-memory --files 'data/test/block-*/inputs.npy' --sort --out data/test/inputs.npy")
-    shell("hypothesis merge --extension numpy --dimension 0 --in-memory --files 'data/test/block-*/outputs.npy' --sort --out data/test/outputs.npy")
+    shell("hypothesis merge --extension numpy --dimension 0 --files 'data/test/block-*/inputs.npy' --sort --out data/test/inputs.npy")
+    shell("hypothesis merge --extension numpy --dimension 0 --files 'data/test/block-*/outputs.npy' --sort --out data/test/outputs.npy")
     shell("rm -rf data/test/block-*")
     os.chdir(cwd)
 
@@ -159,26 +160,27 @@ dependencies = []
 r"""
 """
 
+
 def evaluate_point_classifier(simulation_budget, cl_list=[0.95]):
     r""""""
     storagedir = outputdir + "/" + str(simulation_budget)
+    storagedir += "/without-regularization"
 
-    @w.dependency(simulate_test)
+    @w.dependency(merge_test)
     @w.dependency(merge_train)
     @w.postcondition(w.num_files(storagedir + "/mlp-0*/weights.th", num_ensembles))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
-    @w.slurm.timelimit("72:00:00")
+    @w.slurm.cpu_and_memory(4, "16g")
+    @w.slurm.timelimit("48:00:00")
     @w.tasks(num_ensembles)
     def train_ratio_estimator(task_index):
         resultdir = storagedir + "/mlp-" + str(task_index).zfill(5)
         os.makedirs(resultdir, exist_ok=True)
         if not os.path.exists(resultdir + "/weights.th"):
-            logging.info("Training classifier ratio estimator ({index} / {n}) for the GW problem.".format(index=task_index + 1, n=num_ensembles))
+            logging.info("Training classifier ratio estimator ({index} / {n}) for the Lotka Volterra problem.".format(index=task_index + 1, n=num_ensembles))
             logging.info("Using the following hyper parameters:")
             logging.info(" - batch-size     : " + str(batch_size))
             logging.info(" - epochs         : " + str(epochs))
-            logging.info(" - learning-rate  : 0.001")
+            logging.info(" - learning-rate  : " + str(learning_rate))
             logging.info(" - simulations    : " + str(simulation_budget))
             command = r"""python -m hypothesis.bin.ratio_estimation.train --batch-size {batch_size} \
                               --data-test ratio_estimation.DatasetJointTest \
@@ -193,42 +195,39 @@ def evaluate_point_classifier(simulation_budget, cl_list=[0.95]):
                 batch_size=batch_size,
                 epochs=epochs,
                 simulations=simulation_budget,
-                lr=0.001,
+                lr=learning_rate,
                 out=resultdir)
             command += " --criterion hypothesis.nn.ratio_estimation.BaseCriterion"
             # Execute the training procedure
             shell(command)
 
+
     @w.dependency(train_ratio_estimator)
     @w.postcondition(w.num_files(storagedir + "/mlp-0*/coverage.npy", num_ensembles))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("48:00:00")
     @w.tasks(num_ensembles)
     def coverage_individual(task_index):
         resultdir = storagedir + "/mlp-" + str(task_index).zfill(5)
         if not os.path.exists(resultdir + "/coverage.npy"):
             query = resultdir + "/weights.th"
-            coverage = coverage_of_estimator(query, cl_list=cl_list, max_samples=10000)
+            coverage = coverage_of_estimator(query, cl_list=cl_list)
             np.save(resultdir + "/coverage.npy", coverage)
 
 
     @w.dependency(train_ratio_estimator)
     @w.postcondition(w.exists(storagedir + "/coverage-classifier.npy"))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("48:00:00")
     def coverage_ensemble():
         if not os.path.exists(storagedir + "/coverage-classifier.npy"):
             query = storagedir + "/mlp-0*/weights.th"
-            coverage = coverage_of_estimator(query, cl_list=cl_list, max_samples=10000)
+            coverage = coverage_of_estimator(query, cl_list=cl_list, max_samples=20000)
             np.save(storagedir + "/coverage-classifier.npy", coverage)
-
 
     @w.dependency(train_ratio_estimator)
     @w.postcondition(w.num_files(storagedir + "/mlp-0*/diagnostic.npy", num_ensembles))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("00:15:00")
     @w.tasks(num_ensembles)
     def diagnostic_individual(task_index):
@@ -243,8 +242,7 @@ def evaluate_point_classifier(simulation_budget, cl_list=[0.95]):
 
     @w.dependency(train_ratio_estimator)
     @w.postcondition(w.exists(storagedir + "/diagnostic-mlp.npy"))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("00:15:00")
     def diagnostic_ensemble():
         resultdir = storagedir
@@ -258,8 +256,7 @@ def evaluate_point_classifier(simulation_budget, cl_list=[0.95]):
 
     @w.dependency(train_ratio_estimator)
     @w.postcondition(w.num_files(storagedir + "/mlp-0*/sbc.npy", num_ensembles))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("48:00:00")
     @w.tasks(num_ensembles)
     def sbc_individual(task_index):
@@ -270,8 +267,7 @@ def evaluate_point_classifier(simulation_budget, cl_list=[0.95]):
 
     @w.dependency(train_ratio_estimator)
     @w.postcondition(w.exists(storagedir + "/sbc-classifier.npy"))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("48:00:00")
     def sbc_ensemble():
         if not os.path.exists(storagedir + "/sbc-classifier.npy"):
@@ -287,22 +283,21 @@ def evaluate_point_classifier(simulation_budget, cl_list=[0.95]):
     dependencies.append(sbc_individual)
     dependencies.append(sbc_ensemble)
 
-    @w.dependency(simulate_test)
+    @w.dependency(merge_test)
     @w.dependency(merge_train)
     @w.postcondition(w.num_files(storagedir + "/mlp-bagging-0*/weights.th", num_ensembles))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
-    @w.slurm.timelimit("72:00:00")
+    @w.slurm.cpu_and_memory(4, "16g")
+    @w.slurm.timelimit("48:00:00")
     @w.tasks(num_ensembles)
     def train_ratio_estimator_bagging(task_index):
         resultdir = storagedir + "/mlp-bagging-" + str(task_index).zfill(5)
         os.makedirs(resultdir, exist_ok=True)
         if not os.path.exists(resultdir + "/weights.th"):
-            logging.info("Training classifier ratio estimator ({index} / {n}) for the GW problem.".format(index=task_index + 1, n=num_ensembles))
+            logging.info("Training classifier ratio estimator ({index} / {n}) for the Lotka Volterra problem.".format(index=task_index + 1, n=num_ensembles))
             logging.info("Using the following hyper parameters:")
             logging.info(" - batch-size     : " + str(batch_size))
             logging.info(" - epochs         : " + str(epochs))
-            logging.info(" - learning-rate  : 0.001")
+            logging.info(" - learning-rate  : " + str(learning_rate))
             logging.info(" - simulations    : " + str(simulation_budget))
             command = r"""python -m hypothesis.bin.ratio_estimation.train --batch-size {batch_size} \
                               --data-test ratio_estimation.DatasetJointTest \
@@ -317,7 +312,7 @@ def evaluate_point_classifier(simulation_budget, cl_list=[0.95]):
                 batch_size=batch_size,
                 epochs=epochs,
                 simulations=simulation_budget,
-                lr=0.001,
+                lr=learning_rate,
                 out=resultdir)
             command += " --criterion hypothesis.nn.ratio_estimation.BaseCriterion"
             # Execute the training procedure
@@ -325,19 +320,17 @@ def evaluate_point_classifier(simulation_budget, cl_list=[0.95]):
 
     @w.dependency(train_ratio_estimator_bagging)
     @w.postcondition(w.exists(storagedir + "/coverage-classifier-bagging.npy"))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("48:00:00")
     def coverage_ensemble_bagging():
         if not os.path.exists(storagedir + "/coverage-classifier-bagging.npy"):
             query = storagedir + "/mlp-bagging-0*/weights.th"
-            coverage = coverage_of_estimator(query, cl_list=cl_list, max_samples=10000)
+            coverage = coverage_of_estimator(query, cl_list=cl_list, max_samples=20000)
             np.save(storagedir + "/coverage-classifier-bagging.npy", coverage)
 
     @w.dependency(train_ratio_estimator_bagging)
     @w.postcondition(w.exists(storagedir + "/diagnostic-mlp-bagging.npy"))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("00:15:00")
     def diagnostic_ensemble_bagging():
         resultdir = storagedir
@@ -350,35 +343,28 @@ def evaluate_point_classifier(simulation_budget, cl_list=[0.95]):
 
     @w.dependency(train_ratio_estimator_bagging)
     @w.postcondition(w.exists(storagedir + "/sbc-classifier-bagging.npy"))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("48:00:00")
     def sbc_ensemble_bagging():
         if not os.path.exists(storagedir + "/sbc-classifier-bagging.npy"):
             query = storagedir + "/mlp-bagging-0*/weights.th"
             compute_sbc(query, sbc_nb_rank_samples, sbc_nb_posterior_samples, storagedir + "/sbc-classifier-bagging.npy")
 
-    # Add the dependencies for the summary notebook.
-    dependencies.append(diagnostic_ensemble_bagging)
-    dependencies.append(coverage_ensemble_bagging)
-    dependencies.append(sbc_ensemble_bagging)
-
-    @w.dependency(simulate_test)
+    @w.dependency(merge_test)
     @w.dependency(merge_train)
     @w.postcondition(w.num_files(storagedir + "/mlp-static-0*/weights.th", num_ensembles))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
-    @w.slurm.timelimit("72:00:00")
+    @w.slurm.cpu_and_memory(4, "16g")
+    @w.slurm.timelimit("48:00:00")
     @w.tasks(num_ensembles)
     def train_ratio_estimator_static(task_index):
         resultdir = storagedir + "/mlp-static-" + str(task_index).zfill(5)
         os.makedirs(resultdir, exist_ok=True)
         if not os.path.exists(resultdir + "/weights.th"):
-            logging.info("Training classifier ratio estimator ({index} / {n}) for the GW problem.".format(index=task_index + 1, n=num_ensembles))
+            logging.info("Training classifier ratio estimator ({index} / {n}) for the Lotka Volterra problem.".format(index=task_index + 1, n=num_ensembles))
             logging.info("Using the following hyper parameters:")
             logging.info(" - batch-size     : " + str(batch_size))
             logging.info(" - epochs         : " + str(epochs))
-            logging.info(" - learning-rate  : 0.001")
+            logging.info(" - learning-rate  : " + str(learning_rate))
             logging.info(" - simulations    : " + str(simulation_budget))
             command = r"""python -m hypothesis.bin.ratio_estimation.train --batch-size {batch_size} \
                               --data-test ratio_estimation.DatasetJointTest \
@@ -393,7 +379,7 @@ def evaluate_point_classifier(simulation_budget, cl_list=[0.95]):
                 batch_size=batch_size,
                 epochs=epochs,
                 simulations=simulation_budget,
-                lr=0.001,
+                lr=learning_rate,
                 out=resultdir)
             command += " --criterion hypothesis.nn.ratio_estimation.BaseCriterion"
             # Execute the training procedure
@@ -401,19 +387,17 @@ def evaluate_point_classifier(simulation_budget, cl_list=[0.95]):
 
     @w.dependency(train_ratio_estimator_static)
     @w.postcondition(w.exists(storagedir + "/coverage-classifier-static.npy"))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("48:00:00")
     def coverage_ensemble_static():
         if not os.path.exists(storagedir + "/coverage-classifier-static.npy"):
             query = storagedir + "/mlp-static-0*/weights.th"
-            coverage = coverage_of_estimator(query, cl_list=cl_list, max_samples=10000)
+            coverage = coverage_of_estimator(query, cl_list=cl_list, max_samples=20000)
             np.save(storagedir + "/coverage-classifier-static.npy", coverage)
 
     @w.dependency(train_ratio_estimator_static)
     @w.postcondition(w.exists(storagedir + "/diagnostic-mlp-static.npy"))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("00:15:00")
     def diagnostic_ensemble_static():
         resultdir = storagedir
@@ -426,19 +410,114 @@ def evaluate_point_classifier(simulation_budget, cl_list=[0.95]):
 
     @w.dependency(train_ratio_estimator_static)
     @w.postcondition(w.exists(storagedir + "/sbc-classifier-static.npy"))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("48:00:00")
     def sbc_ensemble_static():
         if not os.path.exists(storagedir + "/sbc-classifier-static.npy"):
             query = storagedir + "/mlp-static-0*/weights.th"
             compute_sbc(query, sbc_nb_rank_samples, sbc_nb_posterior_samples, storagedir + "/sbc-classifier-static.npy")
 
-    # Add the dependencies for the summary notebook.
-    dependencies.append(diagnostic_ensemble_static)
-    dependencies.append(coverage_ensemble_static)
-    dependencies.append(sbc_ensemble_static)
 
+def evaluate_point_flow(simulation_budget, cl_list=[0.95]):
+    r""""""
+    storagedir = outputdir + "/" + str(simulation_budget)
+    storagedir += "/without-regularization"
+
+    @w.dependency(merge_test)
+    @w.dependency(merge_train)
+    @w.postcondition(w.num_files(storagedir + "/flow-0*/weights.th", num_ensembles))
+    @w.slurm.cpu_and_memory(4, "30g")
+    @w.slurm.timelimit("24:00:00")
+    @w.tasks(num_ensembles)
+    def train_ratio_estimator(task_index):
+        resultdir = storagedir + "/flow-" + str(task_index).zfill(5)
+        os.makedirs(resultdir, exist_ok=True)
+        if not os.path.exists(resultdir + "/weights.th"):
+            learning_rate = 0.001
+            logging.info("Training flow ratio estimator ({index} / {n}) for the Spatial SIR problem.".format(index=task_index + 1, n=num_ensembles))
+            logging.info("Using the following hyper parameters:")
+            logging.info(" - batch-size     : " + str(batch_size))
+            logging.info(" - epochs         : " + str(epochs))
+            logging.info(" - learning-rate  : " + str(learning_rate))
+            logging.info(" - simulations    : " + str(simulation_budget))
+            command = r"""python -m hypothesis.bin.ratio_estimation.train --batch-size {batch_size} \
+                              --data-test ratio_estimation.DatasetJointTest \
+                              --data-train ratio_estimation.DatasetJointTrain{simulations} \
+                              --epochs {epochs} \
+                              --estimator ratio_estimation.FlowRatioEstimator \
+                              --hooks hooks.add \
+                              --lr {lr} \
+                              --gamma 250.0 \
+                              --lrsched-on-plateau \
+                              --out {out} \
+                              --show""".format(
+                batch_size=batch_size,
+                epochs=epochs,
+                simulations=simulation_budget,
+                lr=learning_rate,
+                out=resultdir)
+            command += " --criterion hypothesis.nn.ratio_estimation.BaseCriterion"
+            # Execute the training procedure
+            shell(command)
+
+
+    @w.dependency(train_ratio_estimator)
+    @w.postcondition(w.num_files(storagedir + "/flow-0*/coverage.npy", num_ensembles))
+    @w.slurm.cpu_and_memory(4, "16g")
+    @w.slurm.timelimit("24:00:00")
+    @w.tasks(num_ensembles)
+    def coverage_individual(task_index):
+        resultdir = storagedir + "/flow-" + str(task_index).zfill(5)
+        if not os.path.exists(resultdir + "/coverage.npy"):
+            query = resultdir + "/weights.th"
+            coverage = coverage_of_estimator(query, cl_list=cl_list)
+            np.save(resultdir + "/coverage.npy", coverage)
+
+
+    @w.dependency(train_ratio_estimator)
+    @w.postcondition(w.exists(storagedir + "/coverage-flow.npy"))
+    @w.slurm.cpu_and_memory(4, "16g")
+    @w.slurm.timelimit("24:00:00")
+    def coverage_ensemble():
+        if not os.path.exists(storagedir + "/coverage-flow.npy"):
+            query = storagedir + "/flow-0*/weights.th"
+            coverage = coverage_of_estimator(query, cl_list=cl_list, max_samples=20000)
+            np.save(storagedir + "/coverage-flow.npy", coverage)
+
+    @w.dependency(train_ratio_estimator)
+    @w.postcondition(w.num_files(storagedir + "/flow-0*/diagnostic.npy", num_ensembles))
+    @w.slurm.cpu_and_memory(4, "8g")
+    @w.slurm.timelimit("00:15:00")
+    @w.tasks(num_ensembles)
+    def diagnostic_individual(task_index):
+        resultdir = storagedir + "/flow-" + str(task_index).zfill(5)
+        outputfile = resultdir + "/diagnostic.npy"
+        if not os.path.exists(outputfile):
+            query = resultdir + "/weights.th"
+            r = load_estimator(query)
+            result = measure_diagnostic(r, n=diagnostic_n)
+            np.save(outputfile, result)
+
+
+    @w.dependency(train_ratio_estimator)
+    @w.postcondition(w.exists(storagedir + "/diagnostic-flow.npy"))
+    @w.slurm.cpu_and_memory(4, "8g")
+    @w.slurm.timelimit("00:15:00")
+    def diagnostic_ensemble():
+        resultdir = storagedir
+        outputfile = resultdir + "/diagnostic-flow.npy"
+        if not os.path.exists(outputfile):
+            query = resultdir + "/flow-0*/weights.th"
+            r = load_estimator(query)
+            result = measure_diagnostic(r, n=diagnostic_n)
+            np.save(outputfile, result)
+
+
+    # Add the dependencies for the summary notebook.
+    dependencies.append(diagnostic_individual)
+    dependencies.append(diagnostic_ensemble)
+    dependencies.append(coverage_individual)
+    dependencies.append(coverage_ensemble)
 
 def evaluate_point_flow_sbi(simulation_budget, storagedir=None, cl_list=[0.95]):
     if storagedir is None:
@@ -448,9 +527,8 @@ def evaluate_point_flow_sbi(simulation_budget, storagedir=None, cl_list=[0.95]):
     @w.dependency(simulate_test)
     @w.dependency(merge_train)
     @w.postcondition(w.num_files(storagedir + "/flow-sbi-0*/posterior.pkl", num_ensembles))
-    @w.slurm.cpu_and_memory(4, "64g")
-    @w.slurm.gpu(1)
-    @w.slurm.timelimit("72:00:00")
+    @w.slurm.cpu_and_memory(4, "16g")
+    @w.slurm.timelimit("48:00:00")
     @w.tasks(num_ensembles)
     def train_flow(task_index):
         resultdir = storagedir + "/flow-sbi-" + str(task_index).zfill(5)
@@ -460,34 +538,31 @@ def evaluate_point_flow_sbi(simulation_budget, storagedir=None, cl_list=[0.95]):
 
     @w.dependency(train_flow)
     @w.postcondition(w.num_files(storagedir + "/flow-sbi-0*/coverage.npy", num_ensembles))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
-    @w.slurm.timelimit("72:00:00")
+    @w.slurm.cpu_and_memory(4, "16g")
+    @w.slurm.timelimit("48:00:00")
     @w.tasks(num_ensembles)
     def coverage_individual(task_index):
         resultdir = storagedir + "/flow-sbi-" + str(task_index).zfill(5)
         if not os.path.exists(resultdir + "/coverage.npy"):
             query = resultdir + "/posterior.pkl"
-            coverage = coverage_of_estimator(query, cl_list=cl_list, flow_sbi=True, max_samples=10000)
+            coverage = coverage_of_estimator(query, cl_list=cl_list, flow_sbi=True)
             np.save(resultdir + "/coverage.npy", coverage)
 
 
     @w.dependency(train_flow)
     @w.postcondition(w.exists(storagedir + "/coverage-flow-sbi.npy"))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
-    @w.slurm.timelimit("72:00:00")
+    @w.slurm.cpu_and_memory(4, "16g")
+    @w.slurm.timelimit("48:00:00")
     def coverage_ensemble():
         if not os.path.exists(storagedir + "/coverage-flow-sbi.npy"):
             query = storagedir + "/flow-sbi-0*/posterior.pkl"
-            coverage = coverage_of_estimator(query, cl_list=cl_list, flow_sbi=True, max_samples=5000)
+            coverage = coverage_of_estimator(query, cl_list=cl_list, flow_sbi=True, max_samples=20000)
             np.save(storagedir + "/coverage-flow-sbi.npy", coverage)
 
 
     @w.dependency(train_flow)
     @w.postcondition(w.num_files(storagedir + "/flow-sbi-0*/sbc.npy", num_ensembles))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("48:00:00")
     @w.tasks(num_ensembles)
     def sbc_individual(task_index):
@@ -498,13 +573,13 @@ def evaluate_point_flow_sbi(simulation_budget, storagedir=None, cl_list=[0.95]):
 
     @w.dependency(train_flow)
     @w.postcondition(w.exists(storagedir + "/sbc-flow-sbi.npy"))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("48:00:00")
     def sbc_ensemble():
         if not os.path.exists(storagedir + "/sbc-flow-sbi.npy"):
             query = storagedir + "/flow-sbi-0*/posterior.pkl"
             compute_sbc(query, sbc_nb_rank_samples, sbc_nb_posterior_samples, storagedir + "/sbc-flow-sbi.npy", flow_sbi=True)
+
 
 
     # Add the dependencies for the summary notebook.
@@ -516,35 +591,36 @@ def evaluate_point_flow_sbi(simulation_budget, storagedir=None, cl_list=[0.95]):
     @w.dependency(simulate_test)
     @w.dependency(merge_train)
     @w.postcondition(w.num_files(storagedir + "/flow-sbi-bagging-0*/posterior.pkl", num_ensembles))
-    @w.slurm.cpu_and_memory(4, "64g")
-    @w.slurm.gpu(1)
-    @w.slurm.timelimit("72:00:00")
+    @w.slurm.cpu_and_memory(4, "16g")
+    @w.slurm.timelimit("48:00:00")
     @w.tasks(num_ensembles)
     def train_flow_bagging(task_index):
         resultdir = storagedir + "/flow-sbi-bagging-" + str(task_index).zfill(5)
         os.makedirs(resultdir, exist_ok=True)
         train_flow_sbi(simulation_budget, epochs, learning_rate, batch_size, resultdir, task_index, bagging=True)
 
+
+
     @w.dependency(train_flow_bagging)
     @w.postcondition(w.exists(storagedir + "/coverage-flow-sbi-bagging.npy"))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
-    @w.slurm.timelimit("72:00:00")
+    @w.slurm.cpu_and_memory(4, "16g")
+    @w.slurm.timelimit("48:00:00")
     def coverage_ensemble_bagging():
         if not os.path.exists(storagedir + "/coverage-flow-sbi-bagging.npy"):
             query = storagedir + "/flow-sbi-bagging-0*/posterior.pkl"
-            coverage = coverage_of_estimator(query, cl_list=cl_list, flow_sbi=True, max_samples=5000)
+            coverage = coverage_of_estimator(query, cl_list=cl_list, flow_sbi=True, max_samples=20000)
             np.save(storagedir + "/coverage-flow-sbi-bagging.npy", coverage)
+
 
     @w.dependency(train_flow_bagging)
     @w.postcondition(w.exists(storagedir + "/sbc-flow-sbi-bagging.npy"))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("48:00:00")
     def sbc_ensemble_bagging():
         if not os.path.exists(storagedir + "/sbc-flow-sbi-bagging.npy"):
             query = storagedir + "/flow-sbi-bagging-0*/posterior.pkl"
             compute_sbc(query, sbc_nb_rank_samples, sbc_nb_posterior_samples, storagedir + "/sbc-flow-sbi-bagging.npy", flow_sbi=True)
+
 
     # Add the dependencies for the summary notebook.
     dependencies.append(coverage_ensemble_bagging)
@@ -553,35 +629,36 @@ def evaluate_point_flow_sbi(simulation_budget, storagedir=None, cl_list=[0.95]):
     @w.dependency(simulate_test)
     @w.dependency(merge_train)
     @w.postcondition(w.num_files(storagedir + "/flow-sbi-static-0*/posterior.pkl", num_ensembles))
-    @w.slurm.cpu_and_memory(4, "64g")
-    @w.slurm.gpu(1)
-    @w.slurm.timelimit("72:00:00")
+    @w.slurm.cpu_and_memory(4, "16g")
+    @w.slurm.timelimit("48:00:00")
     @w.tasks(num_ensembles)
     def train_flow_static(task_index):
         resultdir = storagedir + "/flow-sbi-static-" + str(task_index).zfill(5)
         os.makedirs(resultdir, exist_ok=True)
         train_flow_sbi(simulation_budget, epochs, learning_rate, batch_size, resultdir, task_index, static=True)
 
+
+
     @w.dependency(train_flow_static)
     @w.postcondition(w.exists(storagedir + "/coverage-flow-sbi-static.npy"))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
-    @w.slurm.timelimit("72:00:00")
+    @w.slurm.cpu_and_memory(4, "16g")
+    @w.slurm.timelimit("48:00:00")
     def coverage_ensemble_static():
         if not os.path.exists(storagedir + "/coverage-flow-sbi-static.npy"):
             query = storagedir + "/flow-sbi-static-0*/posterior.pkl"
-            coverage = coverage_of_estimator(query, cl_list=cl_list, flow_sbi=True, max_samples=5000)
+            coverage = coverage_of_estimator(query, cl_list=cl_list, flow_sbi=True, max_samples=20000)
             np.save(storagedir + "/coverage-flow-sbi-static.npy", coverage)
+
 
     @w.dependency(train_flow_static)
     @w.postcondition(w.exists(storagedir + "/sbc-flow-sbi-static.npy"))
-    @w.slurm.cpu_and_memory(4, "32g")
-    @w.slurm.gpu(1)
+    @w.slurm.cpu_and_memory(4, "16g")
     @w.slurm.timelimit("48:00:00")
     def sbc_ensemble_static():
         if not os.path.exists(storagedir + "/sbc-flow-sbi-static.npy"):
             query = storagedir + "/flow-sbi-static-0*/posterior.pkl"
             compute_sbc(query, sbc_nb_rank_samples, sbc_nb_posterior_samples, storagedir + "/sbc-flow-sbi-static.npy", flow_sbi=True)
+
 
     # Add the dependencies for the summary notebook.
     dependencies.append(coverage_ensemble_static)
@@ -592,9 +669,8 @@ for simulation_budget in simulations:
     if arguments.only_flows:
         evaluate_point_flow_sbi(simulation_budget, cl_list=credible_interval_levels)
     else:
-        evaluate_point_classifier(simulation_budget, cl_list=credible_interval_levels)
+        evaluate_point_classifier(simulation_budget, regularize=False, cl_list=credible_interval_levels)
         evaluate_point_flow_sbi(simulation_budget, cl_list=credible_interval_levels)
-
 
 ### END Workflow definition ####################################################
 

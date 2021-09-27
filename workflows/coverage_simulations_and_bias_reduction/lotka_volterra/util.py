@@ -1,11 +1,16 @@
+r"""CASBI: Conservative Amortized Simulation-Based Inference
+
+Spatial SIR problem.
+"""
+
 import numpy as np
 import os
 import torch
 import glob
 import pickle
 
-from hypothesis.benchmark.gravitational_waves import Prior
-from hypothesis.benchmark.gravitational_waves import Simulator
+from hypothesis.benchmark.lotka_volterra_small import Prior
+from hypothesis.benchmark.lotka_volterra_small import Simulator
 from hypothesis.nn.ratio_estimation import expectation_marginals_ratio
 
 from ratio_estimation import DatasetJointTest as Dataset
@@ -14,13 +19,12 @@ from ratio_estimation import load_estimator
 
 from sbc import sbc_run
 
-
 @torch.no_grad()
 def simulate(n=10000, directory="."):
     simulator = Simulator()
     prior = Prior()
     inputs = prior.sample((n,)).cpu()
-    outputs = simulator(inputs)
+    outputs = simulator(inputs).view(len(inputs), -1) / 100
     if directory is not None:
         if not os.path.exists(directory):
             os.makedirs(directory)
@@ -28,6 +32,7 @@ def simulate(n=10000, directory="."):
         np.save(directory + "/outputs.npy", outputs.numpy())
 
     return inputs, outputs
+
 
 class FlowEnsemble():
     def __init__(self, flows):
@@ -69,18 +74,15 @@ def coverage_of_estimator(path_to_weights, cl_list=[0.95], reduce="ratio_mean", 
     else:
         inputs = d[:max_samples]["inputs"]
         outputs = d[:max_samples]["outputs"]
-
-    if flow_sbi:
-        outputs = outputs.float()
-
+        
     alphas = [1 - cl for cl in cl_list]
     emperical_coverage = coverage(r, inputs, outputs, alphas,flow_sbi=flow_sbi)
 
     return emperical_coverage
 
-
+#100000
 @torch.no_grad()
-def measure_diagnostic(r, n=100000):
+def measure_diagnostic(r, n=10):
     d = Dataset()
 
     return expectation_marginals_ratio(d, r, n=n)
@@ -109,7 +111,6 @@ def compute_sbc(path_to_weights, nb_rank_samples, nb_posterior_samples, save_nam
 
         if len(flows) > 1:
             flow_posterior = FlowEnsemble(flows)
-
         else:
             flow_posterior = flows[0]
 
@@ -118,24 +119,15 @@ def compute_sbc(path_to_weights, nb_rank_samples, nb_posterior_samples, save_nam
                 self.x = x
                 self.flow = flow
 
-            def log_prob(self, theta, batch_size=64):
-                #tmp = self.flow.log_prob(theta, x=self.x)[0]
-
-                observable = observable.to(h.accelerator)
-                log_posterior = torch.empty(len(theta))
-
-                for b in range(0, theta.shape[0], batch_size):
-                    cur_inputs = theta[b:b+batch_size]
-                    log_posterior[b:b+batch_size] = r.log_prob(cur_inputs, x=observable)[0]
-
-                assert(log_posterior.shape == (len(theta),))
-                return log_posterior
+            def log_prob(self, theta):
+                tmp = self.flow.log_prob(theta, x=self.x, norm_posterior=False)[0]
+                assert(tmp.shape == (len(theta),))
+                return tmp
 
 
         def sample_posterior(x, nb_samples):
             posterior = FlowPosterior(x, flow_posterior)
             return importance_posterior_sampling(prior, posterior, nb_samples, nb_samples*100)
-
 
     else:
         r = load_estimator(path_to_weights, reduce=reduce)
@@ -146,18 +138,9 @@ def compute_sbc(path_to_weights, nb_rank_samples, nb_posterior_samples, save_nam
                 self.prior = prior
                 self.ratio = ratio
 
-            def log_prob(self, theta, batch_size=64):
+            def log_prob(self, theta):
                 outputs = self.x.repeat(len(theta), 1, 1, 1).float()
                 return self.prior.log_prob(theta) + self.ratio.log_ratio(inputs=theta, outputs=outputs)
-
-                log_ratios = torch.empty(theta)
-                for b in range(0, theta.shape[0], batch_size):
-                    cur_inputs = theta[b:b+batch_size]
-                    observables = observable.repeat(cur_inputs.shape[0], 1, 1).float()
-                    observables = observables.to(h.accelerator)
-                    log_ratios[b:b+batch_size] = r.log_ratio(inputs=cur_inputs, outputs=observables).squeeze(1)
-
-                return self.prior.log_prob(theta) + log_ratios
 
         def sample_posterior(x, nb_samples):
             posterior = RatioPosterior(x, prior, r)
