@@ -1,4 +1,4 @@
-name: casbi
+name: crisissbi
 channels:
   - pytorch
   - conda-forge
