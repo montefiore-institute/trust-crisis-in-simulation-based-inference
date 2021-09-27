@@ -26,8 +26,6 @@
 \usepackage[colorlinks=true,linkcolor=blue,citecolor=blue]{hyperref}
 
 \usepackage{acronym}
-\usepackage{algorithm}
-\usepackage{algpseudocode}
 \usepackage{amsfonts}
 \usepackage{amsfonts}
 \usepackage{amsmath}
@@ -36,17 +34,11 @@
 \usepackage{bbold}
 \usepackage{booktabs}
 \usepackage{color}
-\usepackage{fontawesome}
 \usepackage{graphics}
 \usepackage{microtype}
 \usepackage{nicefrac}
-\usepackage{tikz}
 \usepackage{caption}
-\usepackage{subcaption}
-\usepackage{placeins}
-\usepackage{wrapfig}
 \usepackage{float}
-\usepackage{dsfont}
 \usepackage{tcolorbox}
 
 \newtcolorbox{custombox}[1][]
@@ -57,7 +49,7 @@
   right=2pt,
   top=2pt,
   bottom=2pt,
-  \centering #1
+  #1
 }
 
 \newcommand{\gilles}[1]{\textcolor{orange}{GL: #1}}
@@ -537,7 +529,7 @@ A striking result, given that sequential methods dedicate the available simulati
 
 \medskip
 
-\begin{custombox}
+\protect\begin{custombox}
 {\bfseries Observation 1} All benchmarked algorithms produce non-conservative posterior approximations. This pathology tends to be accentuated when using a small simulation-budget in both amortized and non-amortized approaches.
 
 \medskip
@@ -579,7 +571,7 @@ Gilles Louppe is recipient of the ULiège - NRB Chair on Big Data and is thankfu
 \bibliography{main}
 
 % Appendix
-\FloatBarrier
+\clearpage
 \newpage
 \appendix
 
